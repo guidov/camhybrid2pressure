@@ -5,13 +5,18 @@ import xarray as xr
 from tqdm import tqdm
 from dask.diagnostics import ProgressBar
 
-# do some atmosphere eddy and mean meridional ciculations.
+# Define functions and wrappers to perform hybrid levels to pressure coordinate transformation
+# This version of the code is used on timeseries with all variables in one file (e.g. ncrcat ...)
+# The required variables are: Z3,T,PS,PHIS
+
 def vinth2p_ecmwf_wrap(
     var3d, hbcoefa, hbcoefb, p0, varps, plevo, phis, tbot, varint, intyp, extrapp, spval
 ):
     """
-    This is a static type wrapper for Deepak's cythonized version of the vinth2p_ecmwf.
+    This is a static type wrapper for the cythonized version of the vinth2p_ecmwf.
+    The orginal code was a fortran version that used an NCL function.
     Some numpy operations on the model variables will change the static type.
+    Original cython code created by Deepak Chandan.
     """
     var3d = np.array(var3d).astype(np.float32)
     hbcoefa = np.array(hbcoefa).astype(np.float64)
@@ -46,7 +51,7 @@ def vinth2p_ecmwf_wrap(
 def h2pvar(cesmxr, var, plevs, intyp="lin"):
     """
     Convert hybrid coordinate level CESM variable to pressure levels using
-    vinth2p_ecmwf_fast converted from ncl and cythonized by Deepak Chandan.
+    vinth2p_ecmwf_fast converted from ncl and cythonized NCL code.
     This function expects the cesm xarray of monthly data or a minimum
     number of a set of cesm variables in an xarray. This function can
     loop over the time variable.
@@ -68,8 +73,8 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
                if interpolating geopotential height
         varint : one of: "T"=1, "Z"=2 or None=3 to indicate whether interpolating temperature,
               geopotential height, or some other variable
-        intyp : specify the interpolation type. Either of: "lin"=1 for linear, "log"=2
-                for log or "loglog"=3 for log-log interpolation
+        intyp : specify the interpolation type. Either of: "lin=1" for linear, "log=2"
+                for log or "loglog=3" for log-log interpolation
         extrapp 0 = no extrapolation when the pressure level is outside of the range of psfc.
 
 
@@ -85,9 +90,10 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
 
     p0 = 1000.0  # hPa
     plevo = plevs
-    spval = 9.96921e36
+    spval = 9.96921e36 # missing value
     extrapp = 1
 
+    # check dimensions on the dataset
     ndim = cesmxr[var].ndim
     if (ndim < 3) and (ndim > 4):
         raise ValueError(
@@ -99,35 +105,39 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
         ntime = cesmxr["time"].data.shape[0]
     except:
         ntime = None
+
+    # why did I do this ???
     try:
         varint = ["T", "Z3"].index(var) + 1
     except:
         varint = 3
 
-    if ntime is None:
-        # Working with no time dimension
-        try:
-            varps = cesmxr["PS"].data / 100.0  # hPa
-        except:
-            raise Exception("No PS varibale in xarray")
-        try:
-            phis = cesmxr["PHIS"].data
-        except:
-            raise Exception("No PHIS varibale in xarray")
-        try:
-            tbot = cesmxr["T"].data[25, :, :]
-        except:
-            raise Exception("No T varibale in xarray")
-        try:
-            var3d = np.ma.masked_invalid(cesmxr[var].data)
-        except:
-            raise Exception("No {} varibale in xarray".format(var))
-        try:
-            intyp = ["lin", "log"].index(var) + 1
-        except:
-            intyp = 3
+    try:
+        varps = cesmxr["PS"].data / 100.0  # hPa
+    except:
+        raise Exception("No PS varibale in xarray")
+    try:
+        phis = cesmxr["PHIS"].data
+    except:
+        raise Exception("No PHIS varibale in xarray")
+    try:
+        tlev = cesmxr.coords["lev"].data.shape[0] - 1 
+        tbot = cesmxr["T"].isel(lev=tlev).data
+    except:
+        raise Exception("problem with tlev or T varibale in xarray")
+    # Get the 3D or 4D variable that needs to be converted
+    try:
+        varxd = np.ma.masked_invalid(cesmxr[var].data)
+    except:
+        raise Exception("No {} varibale in xarray".format(var))
+    try:
+        intyp = ["lin", "log"].index(var) + 1
+    except:
+        intyp = 3
+    # check for file that has no time dimension
+    if ntime == None:
         pvar = vinth2p_ecmwf_wrap(
-            var3d,
+            varxd,
             hbcoefa,
             hbcoefb,
             p0,
@@ -151,84 +161,14 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
             attrs=cesmxr[var].attrs,
             name=var,
         )
-        timeattrs = None
-    elif ntime == 1:
-        # cesm file will have dims(time=1,height,lat,lon)
-        try:
-            varps = cesmxr["PS"].data.squeeze() / 100.0  # hPa
-        except:
-            raise Exception("No PS varibale in xarray")
-        try:
-            phis = cesmxr["PHIS"].data.squeeze()
-        except:
-            raise Exception("No PHIS varibale in xarray")
-        try:
-            tbot = cesmxr["T"].data[0, 25, :, :]
-        except:
-            raise Exception("No T varibale in xarray")
-        try:
-            var3d = np.ma.masked_invalid(cesmxr[var].data.squeeze())
-        except:
-            raise Exception("No {} varibale in xarray".format(var))
-        try:
-            intyp = ["lin", "log"].index(var) + 1
-        except:
-            intyp = 3
-        pvar = vinth2p_ecmwf_wrap(
-            var3d,
-            hbcoefa,
-            hbcoefb,
-            p0,
-            varps,
-            plevo,
-            phis,
-            tbot,
-            varint,
-            intyp,
-            extrapp,
-            spval,
-        )
-        # pvar will have dims(pressure,lat,lon): return xarray.dataset
-        # reconstruct a xarray Dataset form DataArray
-        xrda = xr.DataArray(
-            pvar,
-            coords=[
-                ("plev", plevs),
-                ("lat", cesmxr.coords["lat"].data),
-                ("lon", cesmxr.coords["lon"].data),
-            ],
-            dims=["plev", "lat", "lon"],
-            attrs=cesmxr[var].attrs,
-            name=var,
-        )
-
         timeattrs = None
     else:
-        try:
-            varps = cesmxr["PS"].data / 100.0  # hPa
-        except:
-            raise Exception("No PS varibale in xarray")
-        try:
-            phis = cesmxr["PHIS"].data
-        except:
-            raise Exception("No PHIS varibale in xarray")
-        try:
-            tbot = cesmxr["T"].data[:, 25, :, :]
-        except:
-            raise Exception("No T varibale in xarray")
-        try:
-            var4d = np.ma.masked_invalid(cesmxr[var].data)
-        except:
-            raise Exception("No {} varibale in xarray".format(var))
-        try:
-            intyp = ["lin", "log"].index(var) + 1
-        except:
-            intyp = 3
-
+        # This step needs to be reworked or it may not fit in memory for large files
+        # Maybe using xarray and ufunc will do the job
         pvar = np.array(
             [
                 vinth2p_ecmwf_wrap(
-                    var4d[t],
+                    varxd[t],
                     hbcoefa,
                     hbcoefb,
                     p0,
@@ -244,6 +184,7 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
                 for t in tqdm(range(0, ntime), "converting...")
             ]
         )
+        # Reassemble the numpy array into an xarray DataArray
         xrda = xr.DataArray(
             pvar,
             coords=[
@@ -278,7 +219,7 @@ def h2pvar(cesmxr, var, plevs, intyp="lin"):
 if __name__ == "__main__":
 
     # use this to test out the functions
-    in_file = "cesmrun.cam2.h0.Z3_T_PS_PHIS_hyb_12mon.nc"
+    in_file = "cesmrun.cam2.h0.Z3_T_PS_PHIS_hyb_0mon.nc"
     out_file = "cesmrun.cam2.h0.Z3_p.nc"
     z3_on_hyb = xr.open_dataset(in_file, engine="netcdf4")
     # print(z3_on_hyb)
@@ -308,7 +249,9 @@ if __name__ == "__main__":
         z3_on_p.time.encoding["dtype"] = "float64"
     except:
         pass
-    write_job = z3_on_p.to_netcdf(out_file, unlimited_dims="time", engine="netcdf4", compute=False)
+    write_job = z3_on_p.to_netcdf(
+        out_file, unlimited_dims="time", engine="netcdf4", compute=False
+    )
     with ProgressBar():
         print(f"Writing to {out_file}")
         write_job.compute()
